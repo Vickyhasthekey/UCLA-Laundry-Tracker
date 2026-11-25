@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Laundry Tracker — demo</title>
+<style>
+body{font:17px system-ui;background:#f3f6fa;color:#17324d;max-width:680px;margin:40px auto;padding:0 20px}h1{color:#225d95}label{display:block;margin:18px 0 6px}select,textarea,button{font:inherit;padding:12px;box-sizing:border-box;width:100%;border:1px solid #a4b5c5;border-radius:8px}button{background:#225d95;color:white;margin-top:16px;cursor:pointer}button:disabled{opacity:.5}article{background:white;padding:18px;margin:12px 0;border-radius:10px}aside{background:#fff0bd;padding:15px;border-radius:8px}#message{min-height:25px}small{display:block;color:#566575}
+</style>
+<h1>Laundry Tracker — AWS integration demo</h1>
+<aside>Member C infrastructure test. Demo rooms, machines and reports. Status computation and undo await Member B’s implementation. Student reports do not verify machine condition.</aside>
+<label for="room">Laundry room</label><select id="room" disabled></select>
+<label for="machine">Machine</label><select id="machine" disabled></select>
+<form id="report">
+<label for="issue">Issue</label><select id="issue"><option value="WONT_START">Won’t start</option><option value="NOT_DRYING">Not drying</option><option value="LEAKING">Leaking</option><option value="OTHER">Other</option></select>
+<input name="website" id="website" tabindex="-1" autocomplete="off" aria-hidden="true" style="display:none">
+<button id="submit" disabled>Submit demo report</button>
+</form>
+<p id="message" role="status" aria-live="polite"></p>
+<h2>Recent reports</h2><button id="refresh" type="button" disabled>Refresh reports</button><section id="history" aria-live="polite"></section>
+<script src="config.js"></script>
+<script>
+const el=id=>document.getElementById(id);
+let device=localStorage.getItem('laundry-demo-device');if(!device){device=crypto.randomUUID();localStorage.setItem('laundry-demo-device',device);}
+let generation=0;
+async function api(path,options){if(!window.API_BASE_URL)throw Error('Set API_BASE_URL in config.js first.');const r=await fetch(window.API_BASE_URL+path,{...options,headers:{...options?.headers,'X-Device-Id':device}});const d=await r.json();if(!r.ok)throw Error(d.error||'Request failed. Please retry.');return d;}
+function options(id,items,key,title){el(id).replaceChildren(...items.map(item=>{const o=document.createElement('option');o.value=item[key];o.textContent=item[title];return o;}));el(id).disabled=!items.length;}
+function message(s){el('message').textContent=s;}
+async function history(){const token=++generation;const id=el('machine').value;el('history').textContent='Loading reports…';if(!id){el('history').textContent='No machines yet.';return;}const d=await api('/machines/'+encodeURIComponent(id)+'/reports');if(token!==generation)return;el('history').replaceChildren();if(!d.items.length)el('history').textContent='No reports yet. Machine condition is unknown.';for(const r of d.items){const card=document.createElement('article');const title=document.createElement('strong');title.textContent=r.issueType.replaceAll('_',' ');const note=document.createElement('p');note.textContent='Student-reported issue; condition unverified.';const time=document.createElement('small');time.textContent='Demo student report · '+new Date(r.createdAt).toLocaleString();card.append(title,note,time);el('history').append(card);}}
+async function loadMachines(){generation++;el('submit').disabled=true;el('refresh').disabled=true;el('machine').disabled=true;el('machine').replaceChildren();el('history').textContent='Loading machines…';const room=el('room').value;if(!room){el('history').textContent='No rooms yet.';return;}const d=await api('/rooms/'+encodeURIComponent(room)+'/machines');options('machine',d.items,'machineId','label');el('submit').disabled=!d.items.length;el('refresh').disabled=!d.items.length;await history();}
+el('room').onchange=()=>loadMachines().catch(e=>message(e.message));el('machine').onchange=()=>history().catch(e=>message(e.message));el('refresh').onclick=()=>history().catch(e=>message(e.message));
+el('report').onsubmit=async e=>{e.preventDefault();el('submit').disabled=true;el('room').disabled=true;el('machine').disabled=true;let saved=false;try{await api('/machines/'+encodeURIComponent(el('machine').value)+'/reports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({issueType:el('issue').value,website:el('website').value})});saved=true;message('Demo report saved.');await history();}catch(e){message(saved?'Report saved, but history could not refresh. Use Refresh reports.':e.message);}finally{el('submit').disabled=false;el('room').disabled=false;el('machine').disabled=false;}};
+(async()=>{const d=await api('/rooms');options('room',d.items,'roomId','name');await loadMachines();})().catch(e=>message(e.message));
+</script>
+</html>

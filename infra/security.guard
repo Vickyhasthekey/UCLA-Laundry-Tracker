@@ -1,0 +1,26 @@
+# Project-specific checks; this is not a comprehensive compliance certification.
+let buckets = Resources.*[ Type == 'AWS::S3::Bucket' ]
+rule private_encrypted_buckets when %buckets !empty {
+  %buckets.Properties.PublicAccessBlockConfiguration {
+    BlockPublicAcls == true
+    BlockPublicPolicy == true
+    IgnorePublicAcls == true
+    RestrictPublicBuckets == true
+  }
+  %buckets.Properties.BucketEncryption exists
+}
+rule retained_data {
+  Resources.Rooms.DeletionPolicy == 'Retain'
+  Resources.Machines.DeletionPolicy == 'Retain'
+  Resources.Reports.DeletionPolicy == 'Retain'
+  Resources.RateLimits.DeletionPolicy == 'Retain'
+}
+rule ttl_enabled {
+  Resources.RateLimits.Properties.TimeToLiveSpecification.Enabled == true
+  Resources.RateLimits.Properties.TimeToLiveSpecification.AttributeName == 'expiresAt'
+}
+rule no_plaintext_device_secret {
+  Resources.Backend.Properties.Environment.Variables.DEVICE_HASH_SECRET_ARN exists
+  Resources.Backend.Properties.Environment.Variables.DEVICE_HASH_SECRET !exists
+  Resources.DeviceHashSecret.Properties.GenerateSecretString exists
+}

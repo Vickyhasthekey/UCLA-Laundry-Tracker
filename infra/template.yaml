@@ -1,0 +1,308 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Laundry Tracker development infrastructure with isolated integration demo and replaceable backend
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    ref: docs/deployment.md
+    must:
+      - Deploy regional resources only in the project selected Region.
+      - Keep secrets out of environment values; pass only the secret ARN.
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Default: http://localhost:8000
+    Description: Frontend origin without trailing slash; update to CloudFront URL after first deploy.
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 10
+    MemorySize: 128
+Resources:
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: [!Ref AllowedOrigin]
+        AllowMethods: [GET, POST, DELETE, OPTIONS]
+        AllowHeaders: [content-type, X-Device-Id]
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiLogs.Arn
+        Format: '{"requestId":"$context.requestId","route":"$context.routeKey","status":"$context.status","latency":"$context.responseLatency"}'
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 5
+  Rooms:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: roomId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: roomId
+          KeyType: HASH
+  Machines:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: roomId
+          AttributeType: S
+        - AttributeName: machineId
+          AttributeType: S
+        - AttributeName: code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: roomId
+          KeyType: HASH
+        - AttributeName: machineId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: ByCode
+          KeySchema:
+            - AttributeName: code
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+  Reports:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: machineId
+          AttributeType: S
+        - AttributeName: reportKey
+          AttributeType: S
+        - AttributeName: reportId
+          AttributeType: S
+        - AttributeName: deviceHash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: machineId
+          KeyType: HASH
+        - AttributeName: reportKey
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: ByReportId
+          KeySchema:
+            - AttributeName: reportId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: ByDeviceTime
+          KeySchema:
+            - AttributeName: deviceHash
+              KeyType: HASH
+            - AttributeName: reportKey
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+  RateLimits:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: bucketKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: bucketKey
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+  DeviceHashSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Server-only HMAC key; never expose to browser or logs
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+  ApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 7
+  Backend:
+    Type: AWS::Serverless::Function
+    Properties:
+      # Member C's isolated smoke demo. Swap only after B supplies a contract.
+      CodeUri: demo/backend/
+      Handler: app.handler
+      Environment:
+        Variables:
+          ROOMS_TABLE: !Ref Rooms
+          MACHINES_TABLE: !Ref Machines
+          REPORTS_TABLE: !Ref Reports
+          RATE_LIMIT_TABLE: !Ref RateLimits
+          DEVICE_HASH_SECRET_ARN: !Ref DeviceHashSecret
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:Scan]
+              Resource: !GetAtt Rooms.Arn
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:Query]
+              Resource:
+                - !GetAtt Machines.Arn
+                - !Sub ${Machines.Arn}/index/ByCode
+            - Effect: Allow
+              Action: [dynamodb:Query, dynamodb:PutItem, dynamodb:UpdateItem]
+              Resource:
+                - !GetAtt Reports.Arn
+                - !Sub ${Reports.Arn}/index/ByReportId
+                - !Sub ${Reports.Arn}/index/ByDeviceTime
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+              Resource: !GetAtt RateLimits.Arn
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref DeviceHashSecret
+      Events:
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /health
+            Method: GET
+        Rooms:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /rooms
+            Method: GET
+        Machines:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /rooms/{roomId}/machines
+            Method: GET
+        ListReports:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /machines/{machineId}/reports
+            Method: GET
+        CreateReport:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /machines/{machineId}/reports
+            Method: POST
+  BackendLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Backend}
+      RetentionInDays: 7
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+  OriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-s3
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        # React client-side routes must return the SPA entry point.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: website
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !Ref OriginAccess
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: website
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+  WebsitePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt WebsiteBucket.Arn
+              - !Sub ${WebsiteBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${WebsiteBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  WebsiteUrl:
+    Value: !Sub https://${Distribution.DomainName}
+  WebsiteBucket:
+    Value: !Ref WebsiteBucket
+  DistributionId:
+    Value: !Ref Distribution
+  RoomsTable:
+    Value: !Ref Rooms
+  MachinesTable:
+    Value: !Ref Machines
+  ReportsTable:
+    Value: !Ref Reports
+  RateLimitsTable:
+    Value: !Ref RateLimits
+  DeviceHashSecretArn:
+    Value: !Ref DeviceHashSecret
+  BackendFunction:
+    Value: !Ref Backend
